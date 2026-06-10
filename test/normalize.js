@@ -495,3 +495,130 @@ test('normalizes shortcut repository format to https', function () {
   normalize(data)
   assert.strictEqual(data.repository.type, 'git', 'type should be git')
 })
+
+test('warn handlers run in registration order before builtin warn', { concurrency: false }, function (t) {
+  var events = []
+  var unregisterFirst = normalize.registerWarningHandler(function (warning) {
+    events.push('first:' + warning.code)
+  })
+  var unregisterSecond = normalize.registerWarningHandler(function (warning) {
+    events.push('second:' + warning.code)
+  })
+
+  t.after(function () {
+    unregisterSecond()
+    unregisterFirst()
+  })
+
+  normalize({
+    name: 'test-package',
+    version: '1.0.0',
+    description: 'description',
+    repository: 'https://npmjs.org',
+    license: 'MIT',
+  }, function (warning) {
+    events.push('builtin:' + warning)
+  })
+
+  assert.deepStrictEqual(events, [
+    'first:missingReadme',
+    'second:missingReadme',
+    'builtin:' + warningMessages.missingReadme,
+  ])
+})
+
+test('warn handlers isolate plugin failures and continue builtin warn flow', { concurrency: false }, function (t) {
+  var events = []
+  var unregisterThrowing = normalize.registerWarningHandler(function () {
+    throw new Error('boom')
+  })
+  var unregisterAfter = normalize.registerWarningHandler(function (warning) {
+    events.push('after:' + warning.code)
+  })
+
+  t.after(function () {
+    unregisterAfter()
+    unregisterThrowing()
+  })
+
+  assert.doesNotThrow(function () {
+    normalize({
+      name: 'test-package',
+      version: '1.0.0',
+      description: 'description',
+      repository: 'https://npmjs.org',
+      license: 'MIT',
+    }, function (warning) {
+      events.push('builtin:' + warning)
+    })
+  })
+
+  assert.deepStrictEqual(events, [
+    'after:missingReadme',
+    'builtin:' + warningMessages.missingReadme,
+  ])
+})
+
+test('warn handlers can filter by field type, private status, and strict mode', { concurrency: false }, function (t) {
+  var events = []
+  var unregisterScripts = normalize.registerWarningHandler({
+    fieldType: function (fieldType) {
+      return fieldType === 'scripts'
+    },
+    private: false,
+    strict: true,
+    handler: function (warning) {
+      events.push('scripts:' + warning.code)
+    },
+  })
+  var unregisterPrivateReadme = normalize.registerWarningHandler({
+    fieldType: ['readme'],
+    private: function (isPrivate) {
+      return isPrivate
+    },
+    strict: false,
+    handler: function (warning) {
+      events.push('private:' + warning.code)
+    },
+  })
+  var unregisterNoMatch = normalize.registerWarningHandler({
+    fieldType: 'license',
+    private: false,
+    strict: true,
+    handler: function (warning) {
+      events.push('unexpected:' + warning.code)
+    },
+  })
+
+  t.after(function () {
+    unregisterNoMatch()
+    unregisterPrivateReadme()
+    unregisterScripts()
+  })
+
+  normalize({
+    name: 'test-package',
+    version: '1.0.0',
+    description: 'description',
+    readme: 'readme',
+    repository: 'https://npmjs.org',
+    license: 'MIT',
+    scripts: 123,
+  }, false, true)
+
+  normalize({
+    name: 'test-package',
+    version: '1.0.0',
+    description: 'description',
+    repository: 'https://npmjs.org',
+    license: 'MIT',
+    private: true,
+  }, function () {
+    events.push('unexpected:builtin')
+  })
+
+  assert.deepStrictEqual(events, [
+    'scripts:nonObjectScripts',
+    'private:missingReadme',
+  ])
+})
