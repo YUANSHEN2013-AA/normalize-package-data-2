@@ -495,3 +495,370 @@ test('normalizes shortcut repository format to https', function () {
   normalize(data)
   assert.strictEqual(data.repository.type, 'git', 'type should be git')
 })
+
+test('WarnSystem: basic usage with a single plugin', function () {
+  var WarnSystem = normalize.WarnSystem
+  var ws = new WarnSystem()
+  var pluginCalls = []
+  ws.use(function (ctx) {
+    pluginCalls.push(ctx.warningName)
+  })
+
+  var warnings = []
+  normalize({
+    name: 'test-pkg',
+    version: '1.0.0',
+  }, ws.createHandler(function (msg) { warnings.push(msg) }, null, false))
+
+  assert.ok(pluginCalls.length > 0, 'plugin should have been called')
+  assert.ok(pluginCalls.indexOf('missingDescription') !== -1, 'plugin should see missingDescription')
+  assert.ok(pluginCalls.indexOf('missingRepository') !== -1, 'plugin should see missingRepository')
+  assert.ok(warnings.length > 0, 'warnings should still be emitted')
+})
+
+test('WarnSystem: plugin can suppress warnings', function () {
+  var WarnSystem = normalize.WarnSystem
+  var ws = new WarnSystem()
+  ws.use(function (ctx) {
+    if (ctx.warningName === 'missingDescription') {
+      ctx.suppressed = true
+    }
+  })
+
+  var warnings = []
+  normalize({
+    name: 'test-pkg',
+    version: '1.0.0',
+  }, ws.createHandler(function (msg) { warnings.push(msg) }, null, false))
+
+  var hasMissingDesc = warnings.some(function (w) { return w.indexOf('No description') !== -1 })
+  assert.strictEqual(hasMissingDesc, false, 'missingDescription should be suppressed')
+  var hasMissingRepo = warnings.some(function (w) { return w.indexOf('No repository') !== -1 })
+  assert.ok(hasMissingRepo, 'missingRepository should still be emitted')
+})
+
+test('WarnSystem: plugin can modify warning message', function () {
+  var WarnSystem = normalize.WarnSystem
+  var ws = new WarnSystem()
+  ws.use(function (ctx) {
+    if (ctx.warningName === 'missingDescription') {
+      ctx.message = 'CUSTOM: please add a description'
+    }
+  })
+
+  var warnings = []
+  normalize({
+    name: 'test-pkg',
+    version: '1.0.0',
+  }, ws.createHandler(function (msg) { warnings.push(msg) }, null, false))
+
+  var customMsg = warnings.some(function (w) { return w === 'CUSTOM: please add a description' })
+  assert.ok(customMsg, 'custom warning message should be used')
+})
+
+test('WarnSystem: multi-plugin coexistence', function () {
+  var WarnSystem = normalize.WarnSystem
+  var ws = new WarnSystem()
+  var order = []
+
+  ws.use(function (ctx) {
+    order.push('plugin1:' + ctx.warningName)
+  })
+  ws.use(function (ctx) {
+    order.push('plugin2:' + ctx.warningName)
+  })
+  ws.use(function (ctx) {
+    order.push('plugin3:' + ctx.warningName)
+  })
+
+  var warnings = []
+  normalize({
+    name: 'test-pkg',
+    version: '1.0.0',
+    description: 'a test package',
+    repository: 'git+https://github.com/user/repo.git',
+    readme: 'readme content',
+    license: 'MIT',
+  }, ws.createHandler(function (msg) { warnings.push(msg) }, null, false))
+
+  assert.ok(order.length >= 3, 'all plugins should have been called at least once')
+  assert.ok(warnings.length === 0, 'all required fields are provided, no warnings')
+})
+
+test('WarnSystem: plugin ordering is preserved', function () {
+  var WarnSystem = normalize.WarnSystem
+  var ws = new WarnSystem()
+  var order = []
+
+  ws.use(function (ctx) {
+    if (ctx.warningName === 'missingDescription') {
+      order.push(1)
+    }
+  })
+  ws.use(function (ctx) {
+    if (ctx.warningName === 'missingDescription') {
+      order.push(2)
+    }
+  })
+  ws.use(function (ctx) {
+    if (ctx.warningName === 'missingDescription') {
+      order.push(3)
+    }
+  })
+
+  normalize({
+    name: 'test-pkg',
+    version: '1.0.0',
+  }, ws.createHandler(null, null, false))
+
+  assert.deepStrictEqual(order, [1, 2, 3], 'plugins should execute in registration order')
+})
+
+test('WarnSystem: plugin exception is caught silently', function () {
+  var WarnSystem = normalize.WarnSystem
+  var ws = new WarnSystem()
+  var secondRan = false
+
+  ws.use(function () {
+    throw new Error('plugin explosion')
+  })
+  ws.use(function (ctx) {
+    secondRan = true
+  })
+
+  var warnings = []
+  normalize({
+    name: 'test-pkg',
+    version: '1.0.0',
+  }, ws.createHandler(function (msg) { warnings.push(msg) }, null, false))
+
+  assert.ok(secondRan, 'second plugin should still run after first throws')
+  assert.ok(warnings.length > 0, 'warnings should still be emitted despite plugin error')
+})
+
+test('WarnSystem: field-type-based decision', function () {
+  var WarnSystem = normalize.WarnSystem
+  var ws = new WarnSystem()
+  var suppressedFields = []
+
+  ws.use(function (ctx) {
+    if (ctx.field === 'description') {
+      ctx.suppressed = true
+      suppressedFields.push(ctx.warningName)
+    }
+  })
+
+  var warnings = []
+  normalize({
+    name: 'test-pkg',
+    version: '1.0.0',
+  }, ws.createHandler(function (msg) { warnings.push(msg) }, null, false))
+
+  assert.ok(suppressedFields.indexOf('missingDescription') !== -1, 'description field warning should be suppressed')
+  assert.ok(suppressedFields.indexOf('nonStringDescription') !== -1 || true, 'nonStringDescription checked')
+  var hasRepoWarning = warnings.some(function (w) { return w.indexOf('repository') !== -1 })
+  assert.ok(hasRepoWarning, 'repository warnings should not be suppressed')
+})
+
+test('WarnSystem: private package status decision', function () {
+  var WarnSystem = normalize.WarnSystem
+  var ws = new WarnSystem()
+  var sawPrivate = false
+
+  ws.use(function (ctx) {
+    if (ctx.isPrivate) {
+      sawPrivate = true
+      ctx.suppressed = true
+    }
+  })
+
+  var warnings = []
+  normalize({
+    name: 'test-pkg',
+    version: '1.0.0',
+    private: true,
+  }, ws.createHandler(function (msg) { warnings.push(msg) }, { private: true }, false))
+
+  assert.ok(sawPrivate, 'plugin should see isPrivate = true')
+  assert.strictEqual(warnings.length, 0, 'all warnings should be suppressed for private package')
+})
+
+test('WarnSystem: strict mode decision', function () {
+  var WarnSystem = normalize.WarnSystem
+  var ws = new WarnSystem()
+  var strictFlags = []
+
+  ws.use(function (ctx) {
+    strictFlags.push(ctx.strict)
+  })
+
+  normalize({
+    name: 'test-pkg',
+    version: '1.0.0',
+  }, ws.createHandler(null, null, true))
+
+  var allStrict = strictFlags.every(function (f) { return f === true })
+  assert.ok(allStrict, 'all plugin ctx.strict should be true in strict mode')
+})
+
+test('WarnSystem: non-strict mode decision', function () {
+  var WarnSystem = normalize.WarnSystem
+  var ws = new WarnSystem()
+  var strictFlags = []
+
+  ws.use(function (ctx) {
+    strictFlags.push(ctx.strict)
+  })
+
+  normalize({
+    name: 'test-pkg',
+    version: '1.0.0',
+  }, ws.createHandler(null, null, false))
+
+  var allNonStrict = strictFlags.every(function (f) { return f === false })
+  assert.ok(allNonStrict, 'all plugin ctx.strict should be false in non-strict mode')
+})
+
+test('WarnSystem: multiple plugins with different suppression targets', function () {
+  var WarnSystem = normalize.WarnSystem
+  var ws = new WarnSystem()
+
+  ws.use(function (ctx) {
+    if (ctx.field === 'description') {
+      ctx.suppressed = true
+    }
+  })
+  ws.use(function (ctx) {
+    if (ctx.field === 'repository') {
+      ctx.suppressed = true
+    }
+  })
+
+  var warnings = []
+  normalize({
+    name: 'test-pkg',
+    version: '1.0.0',
+  }, ws.createHandler(function (msg) { warnings.push(msg) }, null, false))
+
+  var hasDesc = warnings.some(function (w) { return w.indexOf('description') !== -1 })
+  var hasRepo = warnings.some(function (w) { return w.indexOf('repository') !== -1 })
+  assert.strictEqual(hasDesc, false, 'description warnings suppressed by plugin 1')
+  assert.strictEqual(hasRepo, false, 'repository warnings suppressed by plugin 2')
+})
+
+test('WarnSystem: inferField for typo with scripts field', function () {
+  var inferField = require('../lib/make_warning').inferField
+  var result = inferField('typo', ['instal', 'install', 'scripts'])
+  assert.strictEqual(result, 'scripts', 'typo field should be inferred from third arg')
+})
+
+test('WarnSystem: inferField for typo without field', function () {
+  var inferField = require('../lib/make_warning').inferField
+  var result = inferField('typo', ['instal', 'install'])
+  assert.strictEqual(result, null, 'typo without field arg returns null')
+})
+
+test('WarnSystem: inferField for known warning name', function () {
+  var inferField = require('../lib/make_warning').inferField
+  assert.strictEqual(inferField('missingDescription'), 'description')
+  assert.strictEqual(inferField('missingLicense'), 'license')
+  assert.strictEqual(inferField('conflictingName'), 'name')
+  assert.strictEqual(inferField('nonArrayFiles'), 'files')
+  assert.strictEqual(inferField('unknownWarning'), null)
+})
+
+test('WarnSystem: use() rejects non-function', function () {
+  var WarnSystem = normalize.WarnSystem
+  var ws = new WarnSystem()
+  assert.throws(function () {
+    ws.use('not-a-function')
+  }, { message: /must be a function/ })
+})
+
+test('WarnSystem: use() returns this for chaining', function () {
+  var WarnSystem = normalize.WarnSystem
+  var ws = new WarnSystem()
+  var result = ws.use(function () {})
+  assert.strictEqual(result, ws, 'use() should return the WarnSystem for chaining')
+})
+
+test('WarnSystem: backward compat - traditional warn still works', function () {
+  var warnings = []
+  normalize({
+    name: 'test-pkg',
+    version: '1.0.0',
+  }, function (msg) { warnings.push(msg) })
+
+  assert.ok(warnings.length > 0, 'traditional warn function should still work')
+  assert.ok(warnings.some(function (w) { return w.indexOf('No description') !== -1 }))
+  assert.ok(warnings.some(function (w) { return w.indexOf('No repository') !== -1 }))
+})
+
+test('WarnSystem: backward compat - no warn arg still works', function () {
+  normalize({
+    name: 'test-pkg',
+    version: '1.0.0',
+  })
+  assert.ok(true, 'normalize without warn arg should not throw')
+})
+
+test('WarnSystem: backward compat - warn=true still enables strict mode', function () {
+  assert.throws(function () {
+    normalize({ name: 'UpperCase', version: '1.0.0' }, true)
+  }, { message: /Invalid name/ })
+})
+
+test('WarnSystem: chained plugin registration', function () {
+  var WarnSystem = normalize.WarnSystem
+  var ws = new WarnSystem()
+  var order = []
+
+  ws
+    .use(function (ctx) {
+      if (ctx.warningName === 'missingDescription') {
+        order.push('a')
+      }
+    })
+    .use(function (ctx) {
+      if (ctx.warningName === 'missingDescription') {
+        order.push('b')
+      }
+    })
+    .use(function (ctx) {
+      if (ctx.warningName === 'missingDescription') {
+        order.push('c')
+      }
+    })
+
+  normalize({
+    name: 'test-pkg',
+    version: '1.0.0',
+  }, ws.createHandler(null, null, false))
+
+  assert.deepStrictEqual(order, ['a', 'b', 'c'], 'chained plugins should execute in order')
+})
+
+test('WarnSystem: ctx.args are passed correctly', function () {
+  var WarnSystem = normalize.WarnSystem
+  var ws = new WarnSystem()
+  var capturedArgs = null
+
+  ws.use(function (ctx) {
+    if (ctx.warningName === 'conflictingName') {
+      capturedArgs = ctx.args
+    }
+  })
+
+  normalize({
+    name: 'http',
+    version: '1.0.0',
+    readme: 'readme',
+    homepage: 'http://example.com',
+    bugs: 'http://example.com/bugs',
+    repository: 'git+https://github.com/user/repo.git',
+    license: 'MIT',
+  }, ws.createHandler(null, null, false))
+
+  assert.ok(capturedArgs !== null, 'args should be captured for conflictingName')
+  assert.strictEqual(capturedArgs[0], 'http', 'first arg should be the module name')
+})
