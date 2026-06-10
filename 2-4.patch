@@ -1,0 +1,380 @@
+diff --git a/lib/fixers/dependencies.js b/lib/fixers/dependencies.js
+new file mode 100644
+index 0000000..98209d5
+--- /dev/null
++++ b/lib/fixers/dependencies.js
+@@ -0,0 +1,110 @@
++var hostedGitInfo = require('hosted-git-info')
++var depTypes = ['dependencies', 'devDependencies', 'optionalDependencies']
++
++function depObjectify (deps, type, warn) {
++  /* node:coverage disable */
++  // not possible in normal flow
++  if (!deps) {
++    return {}
++  }
++  /* node:coverage enable */
++  if (typeof deps === 'string') {
++    deps = deps.trim().split(/[\n\r\s\t ,]+/)
++  }
++  if (!Array.isArray(deps)) {
++    return deps
++  }
++  warn('deprecatedArrayDependencies', type)
++  var o = {}
++  deps.filter(function (d) {
++    return typeof d === 'string'
++  }).forEach(function (d) {
++    d = d.trim().split(/(:?[@\s><=])/)
++    var dn = d.shift()
++    var dv = d.join('')
++    dv = dv.trim()
++    dv = dv.replace(/^@/, '')
++    o[dn] = dv
++  })
++  return o
++}
++
++function objectifyDeps (data, warn) {
++  depTypes.forEach(function (type) {
++    if (!data[type]) {
++      return
++    }
++    data[type] = depObjectify(data[type], type, warn)
++  })
++}
++
++function addOptionalDepsToDeps (data) {
++  var o = data.optionalDependencies
++  if (!o) {
++    return
++  }
++  var d = data.dependencies || {}
++  Object.keys(o).forEach(function (k) {
++    d[k] = o[k]
++  })
++  data.dependencies = d
++}
++
++module.exports = {
++  fixBundleDependenciesField: function (data) {
++    var bdd = 'bundledDependencies'
++    var bd = 'bundleDependencies'
++    if (data[bdd] && !data[bd]) {
++      data[bd] = data[bdd]
++      delete data[bdd]
++    }
++    if (data[bd] && !Array.isArray(data[bd])) {
++      this.warn('nonArrayBundleDependencies')
++      delete data[bd]
++    } else if (data[bd]) {
++      data[bd] = data[bd].filter(function (filtered) {
++        if (!filtered || typeof filtered !== 'string') {
++          this.warn('nonStringBundleDependency', filtered)
++          return false
++        } else {
++          if (!data.dependencies) {
++            data.dependencies = {}
++          }
++          if (!Object.prototype.hasOwnProperty.call(data.dependencies, filtered)) {
++            this.warn('nonDependencyBundleDependency', filtered)
++            data.dependencies[filtered] = '*'
++          }
++          return true
++        }
++      }, this)
++    }
++  },
++
++  fixDependencies: function (data) {
++    objectifyDeps(data, this.warn)
++    addOptionalDepsToDeps(data, this.warn)
++    this.fixBundleDependenciesField(data)
++
++    ;['dependencies', 'devDependencies'].forEach(function (deps) {
++      if (!(deps in data)) {
++        return
++      }
++      if (!data[deps] || typeof data[deps] !== 'object') {
++        this.warn('nonObjectDependencies', deps)
++        delete data[deps]
++        return
++      }
++      Object.keys(data[deps]).forEach(function (d) {
++        var r = data[deps][d]
++        if (typeof r !== 'string') {
++          this.warn('nonStringDependency', d, JSON.stringify(r))
++          delete data[deps][d]
++        }
++        var hosted = hostedGitInfo.fromUrl(data[deps][d])
++        if (hosted) {
++          data[deps][d] = hosted.toString()
++        }
++      }, this)
++    }, this)
++  },
++}
+diff --git a/lib/fixers/files.js b/lib/fixers/files.js
+new file mode 100644
+index 0000000..6d6c3a8
+--- /dev/null
++++ b/lib/fixers/files.js
+@@ -0,0 +1,43 @@
++module.exports = {
++  fixFilesField: function (data) {
++    var files = data.files
++    if (files && !Array.isArray(files)) {
++      this.warn('nonArrayFiles')
++      delete data.files
++    } else if (data.files) {
++      data.files = data.files.filter(function (file) {
++        if (!file || typeof file !== 'string') {
++          this.warn('invalidFilename', file)
++          return false
++        } else {
++          return true
++        }
++      }, this)
++    }
++  },
++
++  fixBinField: function (data) {
++    if (!data.bin) {
++      return
++    }
++    if (typeof data.bin === 'string') {
++      var b = {}
++      var match
++      if (match = data.name.match(/^@[^/]+[/](.*)$/)) {
++        b[match[1]] = data.bin
++      } else {
++        b[data.name] = data.bin
++      }
++      data.bin = b
++    }
++  },
++
++  fixManField: function (data) {
++    if (!data.man) {
++      return
++    }
++    if (typeof data.man === 'string') {
++      data.man = [data.man]
++    }
++  },
++}
+diff --git a/lib/fixers/people.js b/lib/fixers/people.js
+new file mode 100644
+index 0000000..dbaebaf
+--- /dev/null
++++ b/lib/fixers/people.js
+@@ -0,0 +1,55 @@
++var isEmail = str => str.includes('@') && (str.indexOf('@') < str.lastIndexOf('.'))
++
++function modifyPeople (data, fn) {
++  if (data.author) {
++    data.author = fn(data.author)
++  }['maintainers', 'contributors'].forEach(function (set) {
++    if (!Array.isArray(data[set])) {
++      return
++    }
++    data[set] = data[set].map(fn)
++  })
++  return data
++}
++
++function unParsePerson (person) {
++  if (typeof person === 'string') {
++    return person
++  }
++  var name = person.name || ''
++  var u = person.url || person.web
++  var wrappedUrl = u ? (' (' + u + ')') : ''
++  var e = person.email || person.mail
++  var wrappedEmail = e ? (' <' + e + '>') : ''
++  return name + wrappedEmail + wrappedUrl
++}
++
++function parsePerson (person) {
++  /* node:coverage disable */
++  // not possible in normal flow
++  if (typeof person !== 'string') {
++    return person
++  }
++  /* node:coverage enable */
++  var matchedName = person.match(/^([^(<]+)/)
++  var matchedUrl = person.match(/\(([^()]+)\)/)
++  var matchedEmail = person.match(/<([^<>]+)>/)
++  var obj = {}
++  if (matchedName && matchedName[0].trim()) {
++    obj.name = matchedName[0].trim()
++  }
++  if (matchedEmail) {
++    obj.email = matchedEmail[1]
++  }
++  if (matchedUrl) {
++    obj.url = matchedUrl[1]
++  }
++  return obj
++}
++
++module.exports = {
++  fixPeople: function (data) {
++    modifyPeople(data, unParsePerson)
++    modifyPeople(data, parsePerson)
++  },
++}
+diff --git a/lib/fixers/repository.js b/lib/fixers/repository.js
+new file mode 100644
+index 0000000..8b8eed2
+--- /dev/null
++++ b/lib/fixers/repository.js
+@@ -0,0 +1,112 @@
++var { URL } = require('node:url')
++var hostedGitInfo = require('hosted-git-info')
++var typos = require('../typos.json')
++
++var isEmail = str => str.includes('@') && (str.indexOf('@') < str.lastIndexOf('.'))
++
++function bugsTypos (bugs, warn) {
++  /* node:coverage disable */
++  // not possible in normal flow
++  if (!bugs) {
++    return
++  }
++  /* node:coverage enable */
++  Object.keys(bugs).forEach(function (k) {
++    if (typos.bugs[k]) {
++      warn('typo', k, typos.bugs[k], 'bugs')
++      bugs[typos.bugs[k]] = bugs[k]
++      delete bugs[k]
++    }
++  })
++}
++
++module.exports = {
++  fixRepositoryField: function (data) {
++    if (data.repositories) {
++      this.warn('repositories')
++      data.repository = data.repositories[0]
++    }
++    if (!data.repository) {
++      return this.warn('missingRepository')
++    }
++    if (typeof data.repository === 'string') {
++      data.repository = {
++        type: 'git',
++        url: data.repository,
++      }
++    }
++    var r = data.repository.url || ''
++    if (r) {
++      var hosted = hostedGitInfo.fromUrl(r)
++      if (hosted) {
++        r = data.repository.url
++          = hosted.getDefaultRepresentation() === 'shortcut' ? hosted.https() : hosted.toString()
++      }
++    }
++
++    if (r.match(/github.com\/[^/]+\/[^/]+\.git\.git$/)) {
++      this.warn('brokenGitUrl', r)
++    }
++  },
++
++  fixBugsField: function (data) {
++    if (!data.bugs && data.repository && data.repository.url) {
++      var hosted = hostedGitInfo.fromUrl(data.repository.url)
++      if (hosted && hosted.bugs()) {
++        data.bugs = { url: hosted.bugs() }
++      }
++    } else if (data.bugs) {
++      if (typeof data.bugs === 'string') {
++        if (isEmail(data.bugs)) {
++          data.bugs = { email: data.bugs }
++        } else if (URL.canParse(data.bugs)) {
++          data.bugs = { url: data.bugs }
++        } else {
++          this.warn('nonEmailUrlBugsString')
++        }
++      } else {
++        bugsTypos(data.bugs, this.warn)
++        var oldBugs = data.bugs
++        data.bugs = {}
++        if (oldBugs.url) {
++          if (URL.canParse(oldBugs.url)) {
++            data.bugs.url = oldBugs.url
++          } else {
++            this.warn('nonUrlBugsUrlField')
++          }
++        }
++        if (oldBugs.email) {
++          if (typeof (oldBugs.email) === 'string' && isEmail(oldBugs.email)) {
++            data.bugs.email = oldBugs.email
++          } else {
++            this.warn('nonEmailBugsEmailField')
++          }
++        }
++      }
++      if (!data.bugs.email && !data.bugs.url) {
++        delete data.bugs
++        this.warn('emptyNormalizedBugs')
++      }
++    }
++  },
++
++  fixHomepageField: function (data) {
++    if (!data.homepage && data.repository && data.repository.url) {
++      var hosted = hostedGitInfo.fromUrl(data.repository.url)
++      if (hosted && hosted.docs()) {
++        data.homepage = hosted.docs()
++      }
++    }
++    if (!data.homepage) {
++      return
++    }
++
++    if (typeof data.homepage !== 'string') {
++      this.warn('nonUrlHomepage')
++      return delete data.homepage
++    }
++    if (!URL.canParse(data.homepage)) {
++      data.homepage = 'http://' + data.homepage
++    }
++  },
++}
+diff --git a/lib/fixers/scripts.js b/lib/fixers/scripts.js
+new file mode 100644
+index 0000000..9d94707
+--- /dev/null
++++ b/lib/fixers/scripts.js
+@@ -0,0 +1,30 @@
++var typos = require('../typos.json')
++
++module.exports = {
++  fixTypos: function (data) {
++    Object.keys(typos.topLevel).forEach(function (d) {
++      if (Object.prototype.hasOwnProperty.call(data, d)) {
++        this.warn('typo', d, typos.topLevel[d])
++      }
++    }, this)
++  },
++
++  fixScriptsField: function (data) {
++    if (!data.scripts) {
++      return
++    }
++    if (typeof data.scripts !== 'object') {
++      this.warn('nonObjectScripts')
++      delete data.scripts
++      return
++    }
++    Object.keys(data.scripts).forEach(function (k) {
++      if (typeof data.scripts[k] !== 'string') {
++        this.warn('nonStringScript')
++        delete data.scripts[k]
++      } else if (typos.script[k] && !data.scripts[typos.script[k]]) {
++        this.warn('typo', k, typos.script[k], 'scripts')
++      }
++    }, this)
++  },
++}
