@@ -1,0 +1,214 @@
+diff --git a/lib/make_warning.js b/lib/make_warning.js
+index 3be9c86..fbd315a 100644
+--- a/lib/make_warning.js
++++ b/lib/make_warning.js
+@@ -1,7 +1,9 @@
+ var util = require('util')
+ var messages = require('./warning_messages.json')
+ 
+-module.exports = function () {
++var plugins = []
++
++function makeWarning () {
+   var args = Array.prototype.slice.call(arguments, 0)
+   var warningName = args.shift()
+   if (warningName === 'typo') {
+@@ -13,10 +15,41 @@ module.exports = function () {
+   }
+ }
+ 
++makeWarning.addWarningPlugin = function (plugin) {
++  plugins.push(plugin)
++}
++
++makeWarning.clearWarningPlugins = function () {
++  plugins = []
++}
++
++makeWarning.processWarning = function (info, originalWarn) {
++  var message = makeWarning.apply(null, [info.warningName].concat(info.args))
++  info.message = message
++
++  var shouldWarn = !info.isPrivate
++  for (var i = 0; i < plugins.length; i++) {
++    try {
++      var result = plugins[i](info)
++      if (typeof result === 'boolean') {
++        shouldWarn = result
++      }
++    } catch (e) {
++      // Ignore plugin exceptions
++    }
++  }
++  if (shouldWarn && typeof originalWarn === 'function') {
++    originalWarn(info.message)
++  }
++}
++
+ function makeTypoWarning (providedName, probableName, field) {
++
+   if (field) {
+     providedName = field + "['" + providedName + "']"
+     probableName = field + "['" + probableName + "']"
+   }
+   return util.format(messages.typo, providedName, probableName)
+ }
++
++module.exports = makeWarning
+diff --git a/lib/normalize.js b/lib/normalize.js
+index e806f11..8684dc8 100644
+--- a/lib/normalize.js
++++ b/lib/normalize.js
+@@ -5,18 +5,13 @@ normalize.fixer = fixer
+ 
+ var makeWarning = require('./make_warning')
+ 
++normalize.addWarningPlugin = makeWarning.addWarningPlugin
++normalize.clearWarningPlugins = makeWarning.clearWarningPlugins
++
+ var fieldsToFix = ['name', 'version', 'description', 'repository', 'modules', 'scripts',
+   'files', 'bin', 'man', 'bugs', 'keywords', 'readme', 'homepage', 'license']
+ var otherThingsToFix = ['dependencies', 'people', 'typos']
+ 
+-var thingsToFix = fieldsToFix.map(function (fieldName) {
+-  return ucFirst(fieldName) + 'Field'
+-})
+-// two ways to do this in CoffeeScript on only one line, sub-70 chars:
+-// thingsToFix = fieldsToFix.map (name) -> ucFirst(name) + "Field"
+-// thingsToFix = (ucFirst(name) + "Field" for name in fieldsToFix)
+-thingsToFix = thingsToFix.concat(otherThingsToFix)
+-
+ function normalize (data, warn, strict) {
+   if (warn === true) {
+     warn = null
+@@ -25,20 +20,33 @@ function normalize (data, warn, strict) {
+   if (!strict) {
+     strict = false
+   }
+-  if (!warn || data.private) {
+-    warn = function () { /* noop */ }
+-  }
++  var originalWarn = warn
+ 
+   if (data.scripts &&
+       data.scripts.install === 'node-gyp rebuild' &&
+       !data.scripts.preinstall) {
+     data.gypfile = true
+   }
+-  fixer.warn = function () {
+-    warn(makeWarning.apply(null, arguments))
+-  }
+-  thingsToFix.forEach(function (thingName) {
+-    fixer['fix' + ucFirst(thingName)](data, strict)
++
++  var allFields = fieldsToFix.concat(otherThingsToFix)
++  allFields.forEach(function (fieldName) {
++    var methodName = 'fix' + ucFirst(fieldName)
++    if (fieldsToFix.indexOf(fieldName) !== -1) {
++      methodName += 'Field'
++    }
++    fixer.warn = function () {
++      var args = Array.prototype.slice.call(arguments, 0)
++      var warningName = args[0]
++      var info = {
++        warningName: warningName,
++        args: args.slice(1),
++        field: fieldName,
++        isPrivate: !!data.private,
++        strict: !!strict
++      }
++      makeWarning.processWarning(info, originalWarn)
++    }
++    fixer[methodName](data, strict)
+   })
+   data._id = data.name + '@' + data.version
+ }
+diff --git a/test/normalize.js b/test/normalize.js
+index ce1c3ba..236df5a 100644
+--- a/test/normalize.js
++++ b/test/normalize.js
+@@ -495,3 +495,84 @@ test('normalizes shortcut repository format to https', function () {
+   normalize(data)
+   assert.strictEqual(data.repository.type, 'git', 'type should be git')
+ })
++
++test('plugin mechanism: dynamically decide trigger based on field, private, strict', function () {
++  normalize.clearWarningPlugins()
++  var warnings = []
++  function warn(m) {
++    warnings.push(m)
++  }
++  
++  normalize.addWarningPlugin(function (info) {
++    if (info.field === 'readme' && info.isPrivate) {
++      return true // Force readme warning even if private
++    }
++    if (info.field === 'description' && info.strict) {
++      return false // Suppress description warning if strict
++    }
++  })
++
++  // Case 1: private = true
++  normalize({
++    name: 'test-package',
++    version: '1.0.0',
++    private: true,
++  }, warn, false)
++  // Originally, private=true suppresses all warnings.
++  // Our plugin forces 'readme' warning to true.
++  assert.strictEqual(warnings.length, 1, 'Should have exactly 1 warning')
++  assert.ok(warnings[0].includes('No README data found'), 'Warning should be for readme')
++  warnings.length = 0
++
++  // Case 2: strict = true
++  normalize({
++    name: 'test-package',
++    version: '1.0.0',
++  }, warn, true)
++  // Description warning is suppressed by our plugin.
++  assert.ok(!warnings.some(w => w.includes('description')), 'Description warning should be suppressed')
++  normalize.clearWarningPlugins()
++})
++
++test('plugin mechanism: multiple plugins, exception handling, and order', function () {
++  normalize.clearWarningPlugins()
++  var warnings = []
++  var executionOrder = []
++  
++  function warn(m) {
++    warnings.push(m)
++  }
++
++  normalize.addWarningPlugin(function (info) {
++    executionOrder.push('plugin1')
++    if (info.field === 'readme') {
++      info.message = 'CUSTOM README WARNING'
++    }
++  })
++
++  normalize.addWarningPlugin(function (info) {
++    executionOrder.push('plugin2')
++    throw new Error('Plugin exception')
++  })
++
++  normalize.addWarningPlugin(function (info) {
++    executionOrder.push('plugin3')
++    if (info.field === 'repository') {
++      return false // Suppress repository warning
++    }
++  })
++
++  normalize({
++    name: 'test-package',
++    version: '1.0.0'
++  }, warn, false)
++
++  assert.ok(executionOrder.length > 0, 'Plugins should have been executed')
++  assert.deepStrictEqual(executionOrder.slice(0, 3), ['plugin1', 'plugin2', 'plugin3'], 'Plugins should execute in order')
++  
++  assert.ok(warnings.includes('CUSTOM README WARNING'), 'Message should be modified by plugin1')
++  assert.ok(!warnings.some(w => w.includes('repository field')), 'Repository warning should be suppressed by plugin3')
++  
++  normalize.clearWarningPlugins()
++})
++

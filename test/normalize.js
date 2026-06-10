@@ -495,3 +495,84 @@ test('normalizes shortcut repository format to https', function () {
   normalize(data)
   assert.strictEqual(data.repository.type, 'git', 'type should be git')
 })
+
+test('plugin mechanism: dynamically decide trigger based on field, private, strict', function () {
+  normalize.clearWarningPlugins()
+  var warnings = []
+  function warn(m) {
+    warnings.push(m)
+  }
+  
+  normalize.addWarningPlugin(function (info) {
+    if (info.field === 'readme' && info.isPrivate) {
+      return true // Force readme warning even if private
+    }
+    if (info.field === 'description' && info.strict) {
+      return false // Suppress description warning if strict
+    }
+  })
+
+  // Case 1: private = true
+  normalize({
+    name: 'test-package',
+    version: '1.0.0',
+    private: true,
+  }, warn, false)
+  // Originally, private=true suppresses all warnings.
+  // Our plugin forces 'readme' warning to true.
+  assert.strictEqual(warnings.length, 1, 'Should have exactly 1 warning')
+  assert.ok(warnings[0].includes('No README data found'), 'Warning should be for readme')
+  warnings.length = 0
+
+  // Case 2: strict = true
+  normalize({
+    name: 'test-package',
+    version: '1.0.0',
+  }, warn, true)
+  // Description warning is suppressed by our plugin.
+  assert.ok(!warnings.some(w => w.includes('description')), 'Description warning should be suppressed')
+  normalize.clearWarningPlugins()
+})
+
+test('plugin mechanism: multiple plugins, exception handling, and order', function () {
+  normalize.clearWarningPlugins()
+  var warnings = []
+  var executionOrder = []
+  
+  function warn(m) {
+    warnings.push(m)
+  }
+
+  normalize.addWarningPlugin(function (info) {
+    executionOrder.push('plugin1')
+    if (info.field === 'readme') {
+      info.message = 'CUSTOM README WARNING'
+    }
+  })
+
+  normalize.addWarningPlugin(function (info) {
+    executionOrder.push('plugin2')
+    throw new Error('Plugin exception')
+  })
+
+  normalize.addWarningPlugin(function (info) {
+    executionOrder.push('plugin3')
+    if (info.field === 'repository') {
+      return false // Suppress repository warning
+    }
+  })
+
+  normalize({
+    name: 'test-package',
+    version: '1.0.0'
+  }, warn, false)
+
+  assert.ok(executionOrder.length > 0, 'Plugins should have been executed')
+  assert.deepStrictEqual(executionOrder.slice(0, 3), ['plugin1', 'plugin2', 'plugin3'], 'Plugins should execute in order')
+  
+  assert.ok(warnings.includes('CUSTOM README WARNING'), 'Message should be modified by plugin1')
+  assert.ok(!warnings.some(w => w.includes('repository field')), 'Repository warning should be suppressed by plugin3')
+  
+  normalize.clearWarningPlugins()
+})
+
